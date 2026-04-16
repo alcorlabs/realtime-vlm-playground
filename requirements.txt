@@ -8,6 +8,12 @@ av>=11.0
 # JSON and data handling
 python-dotenv>=1.0
 
+# Live run observability
+rich>=13.7
+
+# Run config
+PyYAML>=6.0
+
 # Optional: for testing and development
 pytest>=7.4
 pytest-cov>=4.1

@@ -1,0 +1,23 @@
+# VLM Orchestrator — run config for clip R066 (circuit breaker, part 2)
+# Invoke with:  python src/run.py --config configs/R066.yaml
+
+clip:
+  procedure:    data/clip_procedures/R066-15July-Circuit-Breaker-part2.json
+  video:        data/videos_full/R066-15July-Circuit-Breaker-part2/Export_py/Video_pitchshift.mp4
+  ground_truth: data/ground_truth_sample/R066-15July-Circuit-Breaker-part2.json
+
+output:
+  events: output/R066.json            # JSONL log auto-derived as output/R066.jsonl
+
+harness:
+  speed:            10.0              # 1.0 for final eval; 10.0 for dev iteration
+  frame_fps:        2.0               # frames delivered per second of video time
+  audio_chunk_sec:  5.0
+
+pipeline:
+  model:              google/gemini-2.5-flash
+  call_interval_sec:  2.0             # min video-time seconds between VLM calls
+  max_workers:        3
+
+evaluation:
+  tolerance_sec: 5.0                  # evaluator match tolerance; auto-runs if ground_truth is set above
