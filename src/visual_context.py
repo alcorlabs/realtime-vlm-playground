@@ -121,10 +121,11 @@ How to use the inputs:
 Step completion rules:
 - A step_completion means the action for that procedure step is finished by one
   of the current frames.
-- The completed final state must be visible in the current frames.
+- The step's completion target from state_end_visual must be visible in the
+  current frames.
 - Do not report completion when the technician has only started the action, or is still performing the action.
-- Prefer the frame timestamp where the completed final state first becomes
-  clearly visible.
+- Prefer the frame timestamp where the state_end_visual evidence first becomes
+  clearly visible in the current window.
 {step_rubric_guidance}
 
 How to use visual context for step detection:
@@ -251,24 +252,27 @@ If there are no events, return {{"events": [], "status": {{"type": "...", "descr
         if self.step_rubric_mode == "strict":
             return (
                 "- The current step rubric is the authority for what visual evidence completes\n"
-                "  the expected step. Do not invent completion just because a step is expected.",
-                "- Before emitting step_completion, explicitly use the current step rubric:\n"
-                "  identify the required final visual state, compare it against the current\n"
-                "  frames, and emit only if at least one completion_visual_state is visibly true.\n"
-                "- If the step is not complete, status.description must say which required visual\n"
-                "  evidence from the rubric is missing or still ambiguous.",
+                "  the expected step. Do not invent completion just because a step is expected.\n"
+                "- Use the rubric as a lifecycle: state_start_visual means the step has begun,\n"
+                "  state_during_visual means it is still underway, and state_end_visual means\n"
+                "  the step is complete.",
+                "- Emit step_completion only when state_end_visual is\n"
+                "  visibly true in the current frames.\n"
+                "- If the step is not complete, status.description must say whether the current\n"
+                "  frames show state_start_visual, state_during_visual, or missing/ambiguous\n"
+                "  evidence for state_end_visual.",
             )
         return (
             "- Use the current step rubric as guidance for what visual evidence may complete\n"
             "  the expected step. The rubric is not exhaustive: equivalent visible evidence\n"
             "  can also count if it clearly satisfies the procedure step. Do not invent\n"
             "  completion just because a step is expected.",
-            "- For emitting step_completion, use the current step rubric as guidance:\n"
-            "  identify the likely required final visual state, compare it against the\n"
-            "  current frames, and emit if the frames show that state or an equivalent\n"
-            "  visual state that clearly completes the step.\n"
-            "- If the step is not complete, status.description must say which expected\n"
-            "  visual evidence is missing or still ambiguous.",
+            "- Use the rubric as lifecycle guidance: state_start_visual means the step has\n"
+            "  begun, state_during_visual means it is still underway, and state_end_visual\n"
+            "  is the preferred completion target. Emit if the frames show state_end_visual\n"
+            "  or an equivalent visual state that clearly completes the step.\n"
+            "- If the step is not complete, status.description must say whether the current\n"
+            "  frames show start/during evidence or what expected end evidence is missing.",
         )
 
     def state_snapshot(

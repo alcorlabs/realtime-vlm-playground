@@ -95,9 +95,25 @@ Procedure steps:
 Use only the procedure text above. Do not assume any video-specific timing,
 ground truth, transcript, or hidden metadata.
 
-For each step, describe how a vision model could decide that the step is
-completed from first-person video frames. Focus on final visible state, state
-changes, relative object positions, and what does NOT count as completion.
+For each step, describe the visual lifecycle of the step from first-person
+video frames. The runtime detector will timestamp step completion at the END of
+the step lifecycle, not at the first sign that the action has begun.
+
+Focus on:
+- state_start_visual: what visible cue shows the step has started.
+- state_during_visual: what visible cue shows the step is still underway or
+  sustained.
+- state_end_visual: what visible cue shows the step is complete/settled/ended.
+- not_completion: visually related actions that are only preparation, partial
+  progress, or ambiguous.
+- ambiguities: practical visual/timing ambiguities that could cause the model
+  to timestamp the wrong phase, confuse similar objects, or overclaim through
+  occlusion.
+
+For sustained-contact steps, state_end_visual should be the end of the sustained
+contact, not the first contact. For removal/insertion/placement steps,
+state_end_visual should be the stable end state: object clear/placed/released,
+object seated/released, object resting stably, or panel fully open/closed.
 
 Return exactly one JSON object and no extra text:
 {{
@@ -106,18 +122,21 @@ Return exactly one JSON object and no extra text:
       "step_id": 1,
       "step_description": "original step text",
       "target_objects": ["objects that should be visually involved"],
-      "completion_visual_states": [
-        "final visual state that proves completion"
+      "state_start_visual": [
+        "visible cue that the step action begins"
       ],
-      "state_changes": [
-        "visible change from before to after"
+      "state_during_visual": [
+        "visible cue that the action/state is underway or sustained"
+      ],
+      "state_end_visual": [
+        "visible cue that the action/state has completed, ended, settled, or been released"
       ],
       "not_completion": [
         "actions that may look related but are only preparation"
       ],
-      "timestamp_rule": "first frame where the completed final state is visible",
+      "timestamp_target": "state_end_visual",
       "ambiguities": [
-        "visual ambiguity to be cautious about"
+        "visual/timing ambiguity that could cause a wrong timestamp or wrong object match"
       ]
     }}
   ]
@@ -181,10 +200,11 @@ def _normalize_rubrics(
             "step_id": step_id,
             "step_description": step["description"],
             "target_objects": _as_string_list(rubric.get("target_objects")),
-            "completion_visual_states": _as_string_list(rubric.get("completion_visual_states")),
-            "state_changes": _as_string_list(rubric.get("state_changes")),
+            "state_start_visual": _as_string_list(rubric.get("state_start_visual")),
+            "state_during_visual": _as_string_list(rubric.get("state_during_visual")),
+            "state_end_visual": _as_string_list(rubric.get("state_end_visual")),
             "not_completion": _as_string_list(rubric.get("not_completion")),
-            "timestamp_rule": str(rubric.get("timestamp_rule") or "first frame where the completed final state is visible"),
+            "timestamp_target": "state_end_visual",
             "ambiguities": _as_string_list(rubric.get("ambiguities")),
         })
     return normalized

@@ -114,6 +114,8 @@ def call_vlm_multi_frame(
     prompt: str,
     model: str = "google/gemini-2.5-flash",
     stream: bool = False,
+    temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
 ) -> str:
     """
     Call a VLM with multiple timestamped frame images.
@@ -139,6 +141,10 @@ def call_vlm_multi_frame(
         "stream": stream,
         "messages": [{"role": "user", "content": content}],
     }
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if top_p is not None:
+        payload["top_p"] = top_p
 
     if stream:
         resp = requests.post(url, json=payload, headers=headers, stream=True, timeout=45)
@@ -213,6 +219,8 @@ class Pipeline:
         api_key: str,
         procedure: Dict[str, Any],
         model: str = "google/gemini-2.5-flash",
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
         step_rubrics: Optional[List[Dict[str, Any]]] = None,
         step_rubric_mode: str = "soft",
         vlm_log_path: Optional[str] = None,
@@ -227,6 +235,8 @@ class Pipeline:
         self.step_by_id = {step["step_id"]: step for step in self.steps}
 
         self.model = model
+        self.temperature = temperature
+        self.top_p = top_p
         self.frame_buffer = deque(maxlen=20)
         self.frames_per_call = 10
         self.call_interval_sec = 5.0
@@ -301,6 +311,8 @@ class Pipeline:
                 frames_base64=[item["frame_base64"] for item in selected_frames],
                 prompt=prompt,
                 model=self.model,
+                temperature=self.temperature,
+                top_p=self.top_p,
             )
             self.api_calls += 1
             self.last_raw_vlm_response = response
@@ -632,6 +644,10 @@ def main():
     parser.add_argument("--api-key", help="OpenRouter API key (or set OPENROUTER_API_KEY)")
     parser.add_argument("--model", default="google/gemini-2.5-flash",
                         help="OpenRouter model string for VLM calls")
+    parser.add_argument("--temperature", type=float,
+                        help="Optional VLM sampling temperature")
+    parser.add_argument("--top-p", type=float,
+                        help="Optional VLM nucleus sampling top_p")
     parser.add_argument("--step-rubric",
                         help="Load an existing procedure-only step rubric JSON")
     parser.add_argument("--step-rubric-output",
@@ -665,6 +681,8 @@ def main():
     print(f"  Video:     {args.video}")
     print(f"  Speed:     {args.speed}x")
     print(f"  Model:     {args.model}")
+    if args.temperature is not None or args.top_p is not None:
+        print(f"  Sampling:  temperature={args.temperature}, top_p={args.top_p}")
     print("  Audio:     ignored (visual-only baseline)")
     print()
 
@@ -723,6 +741,8 @@ def main():
         api_key,
         procedure,
         model=args.model,
+        temperature=args.temperature,
+        top_p=args.top_p,
         step_rubrics=step_rubrics,
         step_rubric_mode=args.step_rubric_mode,
         vlm_log_path=args.vlm_log,
