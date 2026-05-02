@@ -24,6 +24,46 @@ import requests
 from dotenv import load_dotenv
 
 
+DEFAULT_STT_PROMPT = """\
+Transcribe this short audio chunk from a procedure-training video.
+The speech may be quiet, pitch-shifted, noisy, or partially masked by equipment sounds.
+Treat audible speech as instructor/coach instructions unless another speaker is unmistakable.
+Use literal wording as much as possible. Do not "fix" the instruction into a nicer sentence.
+Prefer short imperative commands when the audio is ambiguous.
+The domain is hands-on electrical/mechanical work, so vocabulary may include tools, boxes,
+drawers, panels, switches, breakers, power, sockets, components, reset buttons, left/right,
+top/bottom, open/close, plug/unplug, press, turn on, turn off, leave, keep down, and wait.
+If there is no clear speech, return an empty transcript rather than guessing words like
+"hello", "okay", or unrelated phrases.
+"""
+
+
+CHAT_DIARIZATION_PROMPT = """\
+Listen to this short audio chunk and identify audible speech by speaker.
+Return exactly one JSON object and no extra text.
+
+Use this schema:
+{
+  "segments": [
+    {
+      "speaker": "A",
+      "role_guess": "student | instructor | unknown",
+      "text": "literal spoken words",
+      "confidence": 0.0
+    }
+  ],
+  "summary": "brief note"
+}
+
+Rules:
+- Do not invent speech. If there is no clear speech, return {"segments": [], "summary": "no clear speech"}.
+- Use different speaker labels only when there are audibly different speakers.
+- Infer role from behavior only: instructor gives instructions/corrections; student asks questions,
+  acknowledges, or describes what they are doing.
+- If unsure about role, use "unknown".
+"""
+
+
 def pcm16_mono_to_wav_bytes(audio_bytes: bytes, sample_rate: int = 16000) -> bytes:
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as wav:
@@ -122,6 +162,111 @@ def call_openrouter_stt(
         payload["prompt"] = prompt
 
     resp = requests.post(url, headers=headers, json=payload, timeout=90)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def call_openrouter_chat_audio_stt(
+    api_key: str,
+    wav_bytes: bytes,
+    model: str,
+    temperature: Optional[float],
+    prompt: Optional[str],
+) -> Dict[str, Any]:
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/alcor-labs/vlm-orchestrator-eval",
+        "X-Title": "VLM Orchestrator Evaluation",
+    }
+    instruction = prompt or "Please transcribe this audio file."
+    instruction = (
+        f"{instruction.strip()}\n\n"
+        "Return only the transcript text. Do not add explanations, labels, timestamps, "
+        "speaker names, markdown, or quotes."
+    )
+    payload: Dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": instruction},
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": base64.b64encode(wav_bytes).decode("utf-8"),
+                            "format": "wav",
+                        },
+                    },
+                ],
+            }
+        ],
+    }
+    if temperature is not None:
+        payload["temperature"] = temperature
+
+    resp = requests.post(url, headers=headers, json=payload, timeout=120)
+    resp.raise_for_status()
+    data = resp.json()
+    text = data["choices"][0]["message"].get("content") or ""
+    text = text.strip()
+    if text.startswith("```") and text.endswith("```"):
+        text = text.strip("`").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+        text = text[1:-1].strip()
+    return {
+        "text": text,
+        "usage": data.get("usage"),
+        "raw_response": data,
+    }
+
+
+def parse_json_object(text: str) -> Optional[Dict[str, Any]]:
+    text = text.strip()
+    if not text:
+        return None
+    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if fence:
+        text = fence.group(1)
+    else:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            text = text[start:end + 1]
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def call_openrouter_diarized_stt(
+    api_key: str,
+    wav_bytes: bytes,
+    model: str,
+    language: str,
+) -> Dict[str, Any]:
+    url = "https://openrouter.ai/api/v1/audio/transcriptions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/alcor-labs/vlm-orchestrator-eval",
+        "X-Title": "VLM Orchestrator Evaluation",
+    }
+    payload: Dict[str, Any] = {
+        "model": model,
+        "input_audio": {
+            "data": base64.b64encode(wav_bytes).decode("utf-8"),
+            "format": "wav",
+        },
+        "language": language,
+        "response_format": "diarized_json",
+        "chunking_strategy": "auto",
+    }
+
+    resp = requests.post(url, headers=headers, json=payload, timeout=120)
     resp.raise_for_status()
     return resp.json()
 
@@ -231,7 +376,7 @@ def evaluate_transcript(
         eval_result["passed"] = any(
             score["expected_contained"]
             or score["token_f1"] >= 0.75
-            or score["sequence_similarity"] >= 0.82
+            or score["sequence_similarity"] >= 0.9
             for score in scores
         ) and not forbidden_hits
     else:
@@ -265,6 +410,28 @@ def summarize_eval(chunks: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
             sum(chunk["eval"].get("best_sequence_similarity", 0.0) for chunk in evaluated) / len(evaluated),
             3,
         ),
+    }
+
+
+def summarize_diarization(chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    successful = [chunk for chunk in chunks if not chunk.get("error")]
+    multi_speaker = [chunk for chunk in successful if chunk.get("speaker_count", 0) > 1]
+    speech_chunks = [chunk for chunk in successful if chunk.get("text")]
+    return {
+        "successful_chunks": len(successful),
+        "speech_chunks": len(speech_chunks),
+        "multi_speaker_chunks": len(multi_speaker),
+        "multi_speaker_rate": round(len(multi_speaker) / len(successful), 3) if successful else 0.0,
+        "chunks_with_speakers": [
+            {
+                "start_sec": chunk["start_sec"],
+                "end_sec": chunk["end_sec"],
+                "speakers": chunk.get("speakers", []),
+                "speaker_count": chunk.get("speaker_count", 0),
+                "text": chunk.get("text", ""),
+            }
+            for chunk in successful
+        ],
     }
 
 
@@ -319,6 +486,8 @@ def main():
     parser.add_argument("--output", default="output/audio-stt-experiment.json",
                         help="Output JSON report path")
     parser.add_argument("--api-key", help="OpenRouter API key (or set OPENROUTER_API_KEY)")
+    parser.add_argument("--mode", choices=["transcription", "chat-audio", "diarization", "chat-diarization"], default="transcription",
+                        help="Use OpenRouter audio transcription endpoint or chat-completions input_audio")
     parser.add_argument("--model", default="openai/gpt-4o-transcribe",
                         help="OpenRouter STT model")
     parser.add_argument("--chunk-sec", type=float, default=5.0,
@@ -331,8 +500,10 @@ def main():
                         help="End timestamp for experiment")
     parser.add_argument("--language", default="en")
     parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--prompt", help="Optional STT context prompt")
+    parser.add_argument("--prompt", help="Override the default STT context prompt")
     parser.add_argument("--prompt-file", help="Read STT context prompt from a file")
+    parser.add_argument("--no-default-prompt", action="store_true",
+                        help="Send no STT prompt unless --prompt/--prompt-file is provided")
     parser.add_argument("--expected", help="JSON file with expected_text/expected_phrases per chunk")
     parser.add_argument("--expected-tolerance-sec", type=float, default=0.25,
                         help="Timestamp tolerance for matching expected chunks")
@@ -352,7 +523,9 @@ def main():
         print("ERROR: Set OPENROUTER_API_KEY or pass --api-key")
         sys.exit(1)
 
-    prompt = args.prompt
+    prompt = None if args.no_default_prompt else DEFAULT_STT_PROMPT
+    if args.prompt is not None:
+        prompt = args.prompt
     if args.prompt_file:
         prompt = Path(args.prompt_file).read_text().strip()
     expected_chunks = load_expected(args.expected)
@@ -375,7 +548,7 @@ def main():
         wav_dir.mkdir(parents=True, exist_ok=True)
 
     results = []
-    print(f"Audio STT experiment: {len(chunks)} chunks, model={args.model}")
+    print(f"Audio STT experiment: {len(chunks)} chunks, mode={args.mode}, model={args.model}")
     for idx, chunk in enumerate(chunks, start=1):
         start_sec = chunk["start_sec"]
         end_sec = chunk["end_sec"]
@@ -390,21 +563,80 @@ def main():
             "end_sec": end_sec,
         }
         try:
-            payload = call_openrouter_stt(
-                api_key=api_key,
-                wav_bytes=wav_bytes,
-                model=args.model,
-                language=args.language,
-                temperature=args.temperature,
-                prompt=prompt,
-            )
+            if args.mode == "chat-audio":
+                payload = call_openrouter_chat_audio_stt(
+                    api_key=api_key,
+                    wav_bytes=wav_bytes,
+                    model=args.model,
+                    temperature=args.temperature,
+                    prompt=prompt,
+                )
+            elif args.mode == "chat-diarization":
+                payload = call_openrouter_chat_audio_stt(
+                    api_key=api_key,
+                    wav_bytes=wav_bytes,
+                    model=args.model,
+                    temperature=args.temperature,
+                    prompt=CHAT_DIARIZATION_PROMPT,
+                )
+            elif args.mode == "diarization":
+                payload = call_openrouter_diarized_stt(
+                    api_key=api_key,
+                    wav_bytes=wav_bytes,
+                    model=args.model,
+                    language=args.language,
+                )
+            else:
+                payload = call_openrouter_stt(
+                    api_key=api_key,
+                    wav_bytes=wav_bytes,
+                    model=args.model,
+                    language=args.language,
+                    temperature=args.temperature,
+                    prompt=prompt,
+                )
             record["text"] = (payload.get("text") or "").strip()
             record["usage"] = payload.get("usage")
+            if args.mode == "chat-diarization":
+                parsed = parse_json_object(record["text"])
+                record["parsed_diarization"] = parsed
+                if isinstance(parsed, dict) and isinstance(parsed.get("segments"), list):
+                    payload["segments"] = parsed["segments"]
+                    record["text"] = " ".join(
+                        segment.get("text", "")
+                        for segment in parsed["segments"]
+                        if isinstance(segment, dict)
+                    ).strip()
+            segments = payload.get("segments")
+            if isinstance(segments, list):
+                record["segments"] = segments
+                speakers = sorted({
+                    str(segment.get("speaker"))
+                    for segment in segments
+                    if isinstance(segment, dict) and segment.get("speaker") is not None
+                })
+                record["speakers"] = speakers
+                record["speaker_count"] = len(speakers)
+            if payload.get("raw_response"):
+                record["raw_response"] = payload["raw_response"]
             expected_item = expected_for_chunk(expected_chunks, start_sec, end_sec, args.expected_tolerance_sec)
             if expected_item:
                 record["expected"] = expected_item
             record["eval"] = evaluate_transcript(record["text"], expected_item)
-            print(f"[{start_sec:6.1f}-{end_sec:6.1f}s] {record['text'] or '<empty>'}")
+            if args.mode in {"diarization", "chat-diarization"}:
+                print(
+                    f"[{start_sec:6.1f}-{end_sec:6.1f}s] "
+                    f"speakers={record.get('speakers', [])} text={record['text'] or '<empty>'}"
+                )
+                for segment in record.get("segments", [])[:5]:
+                    if isinstance(segment, dict):
+                        print(
+                            f"    {segment.get('speaker', '?')} "
+                            f"{segment.get('start', '?')}-{segment.get('end', '?')}: "
+                            f"{segment.get('text', '')[:120]}"
+                        )
+            else:
+                print(f"[{start_sec:6.1f}-{end_sec:6.1f}s] {record['text'] or '<empty>'}")
             if record.get("eval") is not None and not record["eval"].get("skipped"):
                 verdict = "PASS" if record["eval"].get("passed") else "FAIL"
                 print(
@@ -413,13 +645,18 @@ def main():
                     f"similarity={record['eval'].get('best_sequence_similarity', 0):.3f}"
                 )
         except requests.RequestException as exc:
-            record["error"] = str(exc)
-            print(f"[{start_sec:6.1f}-{end_sec:6.1f}s] ERROR: {exc}")
+            error_text = str(exc)
+            response = getattr(exc, "response", None)
+            if response is not None and response.text:
+                error_text = f"{error_text}: {response.text[:500]}"
+            record["error"] = error_text
+            print(f"[{start_sec:6.1f}-{end_sec:6.1f}s] ERROR: {error_text}")
         results.append(record)
 
     report = {
         "video": args.video,
         "duration_sec": duration,
+        "mode": args.mode,
         "model": args.model,
         "chunk_sec": args.chunk_sec,
         "overlap_sec": args.overlap_sec,
@@ -430,6 +667,7 @@ def main():
         "prompt": prompt,
         "expected_file": args.expected,
         "eval_summary": summarize_eval(results),
+        "diarization_summary": summarize_diarization(results) if args.mode in {"diarization", "chat-diarization"} else None,
         "chunks": results,
     }
     output_path = Path(args.output)
