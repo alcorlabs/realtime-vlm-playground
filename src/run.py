@@ -512,6 +512,10 @@ class Pipeline:
             "source": source,
             "vlm_observation": raw_response[:1200],
         }
+        for key in ("matched_phase", "rubric_reference", "completion_reasoning"):
+            value = event.get(key)
+            if isinstance(value, (str, dict, list)):
+                emitted[key] = value
         self.harness.emit_event(emitted)
 
         self.completed_steps.add(step_id)
@@ -659,7 +663,8 @@ def main():
     parser.add_argument("--regenerate-step-rubric", action="store_true",
                         help="Ignore cached step rubric and regenerate it")
     parser.add_argument("--rubric-model",
-                        help="OpenRouter model string for rubric generation (defaults to --model)")
+                        default="google/gemini-2.5-pro",
+                        help="OpenRouter model string for rubric generation (default: google/gemini-2.5-pro)")
     parser.add_argument("--vlm-log", help="Optional .json or .jsonl path for VLM prompt/response debug logs")
     parser.add_argument("--vlm-log-start", type=float,
                         help="Only log VLM calls whose frame window overlaps this timestamp")
@@ -687,7 +692,7 @@ def main():
     print()
 
     api_key = args.api_key or os.getenv("OPENROUTER_API_KEY")
-    rubric_model = args.rubric_model or args.model
+    rubric_model = args.rubric_model
     step_rubrics = []
     if args.no_step_rubric:
         print("  Step rubrics: disabled")

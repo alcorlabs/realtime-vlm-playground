@@ -121,20 +121,52 @@ How to use the inputs:
 Step completion rules:
 - A step_completion means the action for that procedure step is finished by one
   of the current frames.
+- Before emitting step_completion, classify the current visual evidence against
+  the current step rubric as one matched_phase: state_start_visual,
+  state_during_visual, state_end_visual, not_completion, or catch_up.
+- Emit step_completion only if matched_phase is state_end_visual or catch_up. If
+  the evidence matches state_start_visual, state_during_visual, or
+  not_completion, do not emit step_completion.
 - The step's completion target from state_end_visual must be visible in the
-  current frames.
+  current frames, except for the catch-up case below.
 - Do not report completion when the technician has only started the action, or is still performing the action.
 - Prefer the frame timestamp where the state_end_visual evidence first becomes
   clearly visible in the current window.
 {step_rubric_guidance}
+
+Catch-up completion rule:
+- Procedure step completions are assumed to happen in order. If the current
+  frames clearly show the next step or a later step underway/completed, and
+  recent visual context shows the current expected step was already underway,
+  treat this as detector/state drift rather than an error.
+- In that case, emit step_completion for the current expected step as a catch-up
+  completion, even if the exact state_end_visual moment was missed between
+  windows.
+- Use the earliest current-frame timestamp that shows the later-step evidence.
+  If the current expected step's state_end_visual is also visible in the current
+  frames, use that more specific timestamp instead.
+- The description must begin with "catch-up inference:" and state which later
+  visible action implies the expected step had completed.
+- If status, summary, window_description, or step_context_updates says the
+  current expected step is complete or catch-up complete, you must include the
+  matching step_completion event in events. Completion only counts in events;
+  do not describe completion only in context fields.
+- For every step_completion event, include rubric_reference and
+  completion_reasoning. rubric_reference should quote or name the exact rubric
+  state/end evidence you used. completion_reasoning should briefly explain why
+  the current frames show completion rather than start, during, or
+  not_completion.
+- For every step_completion event, include matched_phase. It must be
+  state_end_visual or catch_up.
 
 How to use visual context for step detection:
 - Visual context helps you understand continuity: where the student came from,
   which similar-looking objects were previously handled, and what action was
   already underway before this window.
 - Do not emit step_completion from prior context alone. A step completion event
-  still requires current-frame evidence that the step's final state is visible
-  in this window.
+  requires either current-frame evidence that the step's final state is visible
+  in this window, or current-frame later-step evidence that satisfies the
+  catch-up completion rule.
 - Use visual context to avoid duplicate or premature completions. If context
   says the student only handled a container, searched, approached, or prepared,
   do not treat that as completing a step whose named target object or final
@@ -147,13 +179,17 @@ How to use visual context for step detection:
   or uncertain_inferences rather than emitting completion.
 
 Error rules:
-- An error_detected means the technician starts a wrong action, wrong sequence,
-  safety violation, or improper technique.
+- An error_detected means the technician starts a wrong action, uses a wrong
+  object, creates a safety violation, or uses improper technique for the
+  current expected step.
 - Emit it when the current frames show the wrong or contradictory action visibly
   beginning or continuing. Prefer the earliest current-frame timestamp.
 - Do not report passive searching, looking around, approaching, or brief
   incidental contact as an error. Use the visual-context rules below to decide
   whether active manipulation is wrong for the current expected step.
+- Do not report apparent later-step progress as an error. If the current frames
+  appear to show a later procedure step, treat that as possible detector/state
+  drift or missed prior completion, not as an error_detected event.
 
 How to use visual context for error detection:
 - Visual context helps compare the current action against the visual timeline
@@ -163,10 +199,7 @@ How to use visual context for error detection:
 - The procedure steps are granular. Treat the current expected step as the main
   task boundary: an object, location, or action from a previous step should only
   remain relevant if it plausibly helps complete the current expected step.
-- If the current frames show the student continuing, returning to, or using an
-  object/action that belonged to a previous step and is no longer useful for the
-  current expected step, infer this as possible wrong_action or wrong_sequence
-  evidence.
+
 - Do not emit error_detected from prior context alone. The wrong action must
   visibly begin or continue in the current frames.
 - Use visual context to distinguish normal preparation from an error.
@@ -174,7 +207,7 @@ How to use visual context for error detection:
   example, if prior context showed the student apparently preparing to use one
   object or area, but current frames show the student putting it away, abandoning
   it, switching to a different similar-looking object, or doing an incompatible
-  action, describe that contradiction.
+  action, that would be an error.
 - If a prior-step object/action is visibly carried forward into the current
   step, ask whether it contributes to the current step's completion. If not,
   and the interaction is more than brief incidental contact, emit error_detected
@@ -183,7 +216,7 @@ How to use visual context for error detection:
 - If prior context only speculated that an object would be used, and current
   frames show the student not using it or moving to another object, do not state
   that as a definite error by itself. Mark it as possible_error_not_enough_evidence
-  unless the current frames clearly show a wrong object/action/sequence.
+  unless the current frames clearly show a wrong object or wrong action.
 - Stronger error evidence comes from visible contradiction plus current action:
   an object previously prepared is set aside while a different object is used;
   a container believed relevant is ignored and another similar container is
@@ -200,7 +233,10 @@ Return exactly one JSON object with this schema and no extra text:
       "timestamp_sec": 12.5,
       "step_id": 1,
       "confidence": 0.0,
-      "description": "visible completed state"
+      "description": "visible completed state",
+      "matched_phase": "state_end_visual",
+      "rubric_reference": "exact rubric state_end_visual or equivalent completion cue used",
+      "completion_reasoning": "why the current frames show the step is complete"
     }},
     {{
       "type": "error_detected",
@@ -243,7 +279,7 @@ Return exactly one JSON object with this schema and no extra text:
 
 Allowed event types: step_completion, error_detected.
 Allowed status type values: step_in_progress, no_action, uncertain, possible_error_not_enough_evidence, idle_or_waiting.
-Allowed error_type values: wrong_action, wrong_sequence, safety_violation, improper_technique, other.
+Allowed error_type values: wrong_action, safety_violation, improper_technique, other.
 Allowed severity values: info, warning, critical.
 If there are no events, return {{"events": [], "status": {{"type": "...", "description": "..."}}, "summary": "..."}}.
 """.strip()
@@ -257,7 +293,8 @@ If there are no events, return {{"events": [], "status": {{"type": "...", "descr
                 "  state_during_visual means it is still underway, and state_end_visual means\n"
                 "  the step is complete.",
                 "- Emit step_completion only when state_end_visual is\n"
-                "  visibly true in the current frames.\n"
+                "  visibly true in the current frames, or when the catch-up completion rule\n"
+                "  applies because later-step evidence is visible in the current frames.\n"
                 "- If the step is not complete, status.description must say whether the current\n"
                 "  frames show state_start_visual, state_during_visual, or missing/ambiguous\n"
                 "  evidence for state_end_visual.",
@@ -270,7 +307,9 @@ If there are no events, return {{"events": [], "status": {{"type": "...", "descr
             "- Use the rubric as lifecycle guidance: state_start_visual means the step has\n"
             "  begun, state_during_visual means it is still underway, and state_end_visual\n"
             "  is the preferred completion target. Emit if the frames show state_end_visual\n"
-            "  or an equivalent visual state that clearly completes the step.\n"
+            "  or an equivalent visual state that clearly completes the step. Also emit\n"
+            "  when the catch-up completion rule applies because later-step evidence is\n"
+            "  visible in the current frames.\n"
             "- If the step is not complete, status.description must say whether the current\n"
             "  frames show start/during evidence or what expected end evidence is missing.",
         )
