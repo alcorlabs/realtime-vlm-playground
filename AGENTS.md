@@ -1,7 +1,7 @@
 <claude-mem-context>
 # Memory Context
 
-# [realtime-vlm-playground-1] recent context, 2026-05-02 9:15pm EDT
+# [realtime-vlm-playground-1] recent context, 2026-05-03 7:36am EDT
 
 Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision
 Format: ID TIME TYPE TITLE
@@ -558,4 +558,158 @@ visual context without step-completion rubric pressure, then let the text
 reasoner infer practical completion cues from step text + running summary.
 Rubrics are useful for audit/debugging, but can overconstrain hidden-state or
 domain-specific actions.
+```
+
+### 2026-05-02: Integrated Descriptor + Reasoner Pipeline Results
+
+Change:
+
+- Added/reran the integrated descriptor + reasoner pipeline, where the descriptor
+  receives the current expected step from reasoner state before each 5s visual
+  window.
+- Descriptor model: `google/gemini-3.1-flash-image-preview`.
+- Reasoner model: `google/gemini-3.1-pro-preview`.
+- No step rubric was passed; the reasoner inferred completion cues from step
+  text, descriptor windows, procedure state, and running step summaries.
+- Updated reasoner timestamping: events now use the midpoint of the specific 5s
+  descriptor window containing the evidence, instead of the midpoint of the
+  10s reasoner interval.
+
+R142 command:
+
+```bash
+.venv/bin/python src/integrated_pipeline.py \
+  --procedure data/clip_procedures/R142-31Aug-RAM.json \
+  --video data/videos_full/R142-31Aug-RAM/Export_py/Video_pitchshift.mp4 \
+  --output output/R142-integrated-events.json \
+  --descriptor-log output/R142-integrated-descriptor.jsonl \
+  --reasoner-log output/R142-integrated-reasoner.jsonl \
+  --descriptor-model google/gemini-3.1-flash-image-preview \
+  --reasoner-model google/gemini-3.1-pro-preview
+```
+
+R142 result:
+
+```text
+STEP COMPLETION
+Precision: 46.2%
+Recall:    46.2%
+F1:        0.462
+6/13 matched
+
+ERROR DETECTION
+No GT errors and no predicted errors.
+```
+
+R142 step timing:
+
+```text
+1:  22.25s vs 23.20s   matched
+2:  37.25s vs 42.00s   matched
+3:  52.25s vs 53.30s   matched
+4:  57.25s vs 82.00s   early
+5:  87.25s vs 104.30s  early
+6:  92.25s vs 113.10s  early
+7: 107.25s vs 121.10s  early
+8: 117.25s vs 130.30s  early
+9: 157.25s vs 157.00s  matched
+10: 167.25s vs 167.20s matched
+11: 187.25s vs 185.00s matched
+12: 192.25s vs 201.20s early
+13: 207.25s vs 214.20s early
+```
+
+R142 learnings:
+
+- Descriptor-window timestamping helped substantially. R142 improved from
+  `3/13` matched (`F1=0.231`) to `6/13` matched (`F1=0.462`).
+- Step 2 specifically moved from the 10s group midpoint `34.75s` to the
+  descriptor-window midpoint `37.25s`, bringing it within evaluator tolerance.
+- RAM insertions improved: steps 9, 10, and 11 matched cleanly. The reasoner
+  used practical visual evidence such as "hands move away from RAM slots and
+  pick up the next RAM card" as completion evidence for hard-to-see insertion
+  states.
+- The remaining major problem is lifecycle semantics. Step 4, "touches the
+  metal of the computer tower," was emitted at first visible contact
+  (`57.25s`), while GT marks the end of the sustained touch/contact period
+  (`82.0s`). This early step 4 shifts RAM removals 5-8 early.
+- Prompt rule responsible: without rubrics, the reasoner treats "touches metal"
+  as a stable final visible state once the hand rests on the chassis. The
+  current prompt does not distinguish instantaneous action steps from
+  duration/state steps whose completion should be the end/release/transition.
+
+z045 command:
+
+```bash
+.venv/bin/python src/integrated_pipeline.py \
+  --procedure data/clip_procedures/z045-june-24-22-dslr.json \
+  --video data/videos_full/z045-june-24-22-dslr/Export_py/Video_pitchshift.mp4 \
+  --output output/z045-integrated-events.json \
+  --descriptor-log output/z045-integrated-descriptor.jsonl \
+  --reasoner-log output/z045-integrated-reasoner.jsonl \
+  --descriptor-model google/gemini-3.1-flash-image-preview \
+  --reasoner-model google/gemini-3.1-pro-preview
+```
+
+z045 result:
+
+```text
+STEP COMPLETION
+Precision: 25.0%
+Recall:    25.0%
+F1:        0.250
+2/8 matched
+
+ERROR DETECTION
+Precision: 50.0%
+Recall:    42.9%
+F1:        0.462
+3/7 matched
+```
+
+z045 step timing:
+
+```text
+1:  17.25s vs 20.00s   matched
+2:  22.25s vs 31.00s   early
+3:  27.25s vs 52.10s   early catch-up
+4:  27.25s vs 63.30s   early
+5:  82.25s vs 70.20s   late catch-up
+6:  82.25s vs 75.20s   late catch-up
+7:  92.25s vs 112.73s  early
+8: 137.25s vs 139.20s  matched
+```
+
+z045 learnings:
+
+- Descriptor-window timestamping is working, but z045 exposed a different
+  problem: catch-up is too permissive for visible object-transfer steps.
+- In `20.0-29.5s`, the reasoner emitted step 2, then used catch-up for step 3
+  because it saw the lens cover being attached for step 4. This pushed current
+  state to step 5 too early.
+- Because state advanced early, the real lens-cover sequence around `50-63s`
+  was interpreted as wrong actions relative to "turn on DSLR" instead of as
+  steps 3 and 4.
+- Catch-up should probably be limited to hidden/internal/control steps where
+  the required visual state may be unobservable, e.g. turn on/off. It should not
+  be used for visible object manipulation steps where the target object itself
+  should be visible, e.g. withdraw lens cover, remove RAM card, place object.
+- Error precision is useful but state-sensitive. Once state drifts, otherwise
+  valid step actions become "wrong_action" events.
+
+Integrated takeaway:
+
+```text
+The integrated descriptor+reasoner architecture is promising: grounded
+descriptions plus text-only reasoning make traces much easier to inspect, and
+descriptor-window timestamping improves evaluator alignment. The next work is
+not more generic prompt detail; it is explicit step-lifecycle modeling:
+
+1. classify step text as instantaneous action, object-transfer, sustained
+   state/duration, hidden control state, or reversible/retry-prone manipulation;
+2. restrict catch-up to hidden/control or genuinely skipped visual states;
+3. for sustained-state steps, complete on release/transition away rather than
+   first contact;
+4. keep descriptor output rubric-free and grounded, but give the reasoner a
+   lightweight lifecycle policy for each step class.
 ```

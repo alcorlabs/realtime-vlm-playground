@@ -229,6 +229,14 @@ Description rules:
 - Do not state hidden state changes as facts. If an internal mechanism, button
   state, latch state, electrical state, or camera setting is not visible, say it
   is unclear.
+- Do not use definitive completion/state words such as attached, locked,
+  seated, inserted, removed, closed, opened, on, or off unless the stable
+  post-action state is clearly visible after the hand releases or moves away.
+- If the hand is still manipulating, pressing, rotating, aligning or holding the object, 
+  describe the action as in progress along with the last visible state.
+- Prefer grounded wording like "appears aligned", "being rotated", "being
+  pressed", "partially inserted", or "possibly seated" when the final state is
+  not directly visible.
 - You may include likely interpretations only in uncertain_inferences.
 - Preserve uncertainty. Do not turn "appears to" or "possibly" into facts.
 - For step_relevance, only say how visible evidence may relate to the previous,
