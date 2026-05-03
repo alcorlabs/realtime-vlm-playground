@@ -186,18 +186,24 @@ class RoutingReasoner:
         for index, group in enumerate(groups, start=1):
             if self.current_step_index >= len(self.steps):
                 break
-            prompt = self.build_prompt(group)
-            raw_response = call_openrouter_text(
-                api_key=self.api_key,
-                prompt=prompt,
-                model=self.model,
-                temperature=self.temperature,
-                top_p=self.top_p,
-            )
-            parsed = parse_json_response(raw_response)
-            emitted = self.handle_response(parsed, group, raw_response)
-            self.log_call(index, group, prompt, raw_response, parsed, emitted)
+            self.process_group(group, index=index)
         return self.events
+
+    def process_group(self, group: Dict[str, Any], index: Optional[int] = None) -> List[Dict[str, Any]]:
+        if self.current_step_index >= len(self.steps):
+            return []
+        prompt = self.build_prompt(group)
+        raw_response = call_openrouter_text(
+            api_key=self.api_key,
+            prompt=prompt,
+            model=self.model,
+            temperature=self.temperature,
+            top_p=self.top_p,
+        )
+        parsed = parse_json_response(raw_response)
+        emitted = self.handle_response(parsed, group, raw_response)
+        self.log_call(index or 0, group, prompt, raw_response, parsed, emitted)
+        return emitted
 
     def build_prompt(self, group: Dict[str, Any]) -> str:
         current_step = self.current_step()
