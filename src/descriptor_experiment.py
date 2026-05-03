@@ -32,6 +32,8 @@ from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from src.smart_frame_sampler import smart_select_frames
+
 
 WINDOW_DESCRIPTION_KEYS = (
     "start_state",
@@ -287,7 +289,7 @@ def video_duration_sec(cap: Any) -> float:
         return 0.0
     return float(frame_count) / float(fps)
 
-
+# Simple Frame window buffer
 def extract_window_frames(
     *,
     cap: Any,
@@ -302,6 +304,43 @@ def extract_window_frames(
             raise ValueError(f"Could not read frame at {timestamp:.2f}s")
         frames.append(frame_to_base64(frame, jpeg_quality))
     return frames
+
+# Smart Frame Sampler: extract all candidate frames, then select a subset based on visual similarity
+def extract_descriptor_frames(
+    *,
+    cap: Any,
+    timestamps: List[float],
+    jpeg_quality: int,
+    frame_sampler: str,
+    sampler_metric: str,
+) -> tuple[List[str], List[float], Optional[Dict[str, Any]]]:
+    raw_frames = []
+    for timestamp in timestamps:
+        cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000.0)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            raise ValueError(f"Could not read frame at {timestamp:.2f}s")
+        raw_frames.append(frame)
+
+    if frame_sampler == "uniform":
+        return [frame_to_base64(frame, jpeg_quality) for frame in raw_frames], timestamps, None
+    if frame_sampler != "smart":
+        raise ValueError(f"Unknown frame sampler: {frame_sampler}")
+
+    selected = smart_select_frames(
+        frames=raw_frames,
+        timestamps=timestamps,
+        metric=sampler_metric,
+    )
+    selected_frames = [raw_frames[item.index] for item in selected]
+    selected_timestamps = [item.timestamp_sec for item in selected]
+    selection_log = {
+        "sampler": frame_sampler,
+        "metric": sampler_metric,
+        "candidate_timestamps": timestamps,
+        "selected_frames": [item.__dict__ for item in selected],
+    }
+    return [frame_to_base64(frame, jpeg_quality) for frame in selected_frames], selected_timestamps, selection_log
 
 
 def build_windows(
@@ -360,6 +399,8 @@ def main() -> None:
     parser.add_argument("--window-sec", type=float, default=5.0)
     parser.add_argument("--frame-fps", type=float, default=2.0)
     parser.add_argument("--frames-per-window", type=int, default=10)
+    parser.add_argument("--frame-sampler", choices=["uniform", "smart"], default="uniform")
+    parser.add_argument("--sampler-metric", choices=["ssim", "mad"], default="ssim")
     parser.add_argument("--jpeg-quality", type=int, default=80)
     parser.add_argument("--timeout-sec", type=int, default=90)
     parser.add_argument("--max-windows", type=int)
@@ -408,6 +449,7 @@ def main() -> None:
     print(f"  Video:     {args.video}")
     print(f"  Duration:  {duration:.1f}s")
     print(f"  Windows:   {len(windows)} ({args.window_sec:.1f}s, {args.frames_per_window} frames each @ {args.frame_fps:.1f}fps)")
+    print(f"  Sampler:   {args.frame_sampler}" + (f" ({args.sampler_metric})" if args.frame_sampler == "smart" else ""))
     print(f"  Model:     {args.model}")
     print(f"  Output:    {args.output}")
     print()
@@ -434,16 +476,18 @@ def main() -> None:
             step_hints=step_hints,
             default_step_id=args.current_step_id,
         )
-        prompt = build_descriptor_prompt(
-            procedure=procedure,
-            frame_timestamps=timestamps,
-            current_step_id=current_step_id,
-        )
         try:
-            frames_base64 = extract_window_frames(
+            frames_base64, selected_timestamps, selection_log = extract_descriptor_frames(
                 cap=cap,
                 timestamps=timestamps,
                 jpeg_quality=args.jpeg_quality,
+                frame_sampler=args.frame_sampler,
+                sampler_metric=args.sampler_metric,
+            )
+            prompt = build_descriptor_prompt(
+                procedure=procedure,
+                frame_timestamps=selected_timestamps,
+                current_step_id=current_step_id,
             )
             raw_response = call_openrouter_descriptor(
                 api_key=api_key,
@@ -460,9 +504,19 @@ def main() -> None:
             raw_response = ""
             parsed = None
             window_description = None
+            selected_timestamps = timestamps
+            selection_log = None
+            prompt = build_descriptor_prompt(
+                procedure=procedure,
+                frame_timestamps=selected_timestamps,
+                current_step_id=current_step_id,
+            )
             print(f"[{window['frame_window'][0]:6.1f}-{window['frame_window'][1]:6.1f}s] ERROR: {exc}")
             append_jsonl(log_path, {
                 **window,
+                "candidate_frame_timestamps": timestamps,
+                "selected_frame_timestamps": selected_timestamps,
+                "frame_selection": selection_log,
                 "current_step_id_hint": current_step_id,
                 "prompt": prompt,
                 "raw_response": raw_response,
@@ -470,7 +524,13 @@ def main() -> None:
                 "window_description": window_description,
                 "error": str(exc),
             })
-            described_windows.append({**window, "window_description": None})
+            described_windows.append({
+                **window,
+                "candidate_frame_timestamps": timestamps,
+                "frame_timestamps": selected_timestamps,
+                "current_step_id_hint": current_step_id,
+                "window_description": None,
+            })
             continue
 
         print(
@@ -479,12 +539,17 @@ def main() -> None:
         )
         described_window = {
             **window,
+            "candidate_frame_timestamps": timestamps,
+            "frame_timestamps": selected_timestamps,
             "current_step_id_hint": current_step_id,
             "window_description": window_description,
         }
         described_windows.append(described_window)
         append_jsonl(log_path, {
             **window,
+            "candidate_frame_timestamps": timestamps,
+            "selected_frame_timestamps": selected_timestamps,
+            "frame_selection": selection_log,
             "current_step_id_hint": current_step_id,
             "prompt": prompt,
             "raw_response": raw_response,
@@ -506,6 +571,8 @@ def main() -> None:
         "window_sec": args.window_sec,
         "frame_fps": args.frame_fps,
         "frames_per_window": args.frames_per_window,
+        "frame_sampler": args.frame_sampler,
+        "sampler_metric": args.sampler_metric if args.frame_sampler == "smart" else None,
         "uses_step_rubric": False,
         "uses_visual_summary": False,
         "windows": described_windows,

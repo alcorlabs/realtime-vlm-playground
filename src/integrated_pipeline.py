@@ -42,7 +42,7 @@ from src.descriptor_experiment import (
     build_descriptor_prompt,
     build_windows,
     call_openrouter_descriptor,
-    extract_window_frames,
+    extract_descriptor_frames,
     normalize_window_description,
     parse_json_response,
     video_duration_sec,
@@ -74,6 +74,8 @@ def run_integrated(
     descriptor_top_p: Optional[float],
     descriptor_timeout_sec: int,
     jpeg_quality: int,
+    frame_sampler: str,
+    sampler_metric: str,
     windows_per_call: int,
     descriptor_log_path: Optional[Path],
     reasoner_log_path: Optional[Path],
@@ -99,17 +101,18 @@ def run_integrated(
         for window in group_windows:
             timestamps = window["frame_timestamps"]
             frame_window = window["frame_window"]
-            prompt = build_descriptor_prompt(
-                procedure=procedure,
-                frame_timestamps=timestamps,
-                current_step_id=current_step_id,
-            )
-
             try:
-                frames_base64 = extract_window_frames(
+                frames_base64, selected_timestamps, selection_log = extract_descriptor_frames(
                     cap=cap,
                     timestamps=timestamps,
                     jpeg_quality=jpeg_quality,
+                    frame_sampler=frame_sampler,
+                    sampler_metric=sampler_metric,
+                )
+                prompt = build_descriptor_prompt(
+                    procedure=procedure,
+                    frame_timestamps=selected_timestamps,
+                    current_step_id=current_step_id,
                 )
                 raw_response = call_openrouter_descriptor(
                     api_key=api_key,
@@ -127,6 +130,13 @@ def run_integrated(
                 raw_response = ""
                 parsed = None
                 window_description = None
+                selected_timestamps = timestamps
+                selection_log = None
+                prompt = build_descriptor_prompt(
+                    procedure=procedure,
+                    frame_timestamps=selected_timestamps,
+                    current_step_id=current_step_id,
+                )
                 error_str = str(exc)
                 print(f"  [descriptor] ERROR {frame_window}: {exc}")
 
@@ -138,6 +148,8 @@ def run_integrated(
 
             described_window = {
                 **window,
+                "candidate_frame_timestamps": timestamps,
+                "frame_timestamps": selected_timestamps,
                 "current_step_id_hint": current_step_id,
                 "window_description": window_description,
             }
@@ -146,6 +158,9 @@ def run_integrated(
 
             append_jsonl(descriptor_log_path, {
                 **window,
+                "candidate_frame_timestamps": timestamps,
+                "selected_frame_timestamps": selected_timestamps,
+                "frame_selection": selection_log,
                 "current_step_id_hint": current_step_id,
                 "prompt": prompt,
                 "raw_response": raw_response,
@@ -224,6 +239,8 @@ def main() -> None:
     parser.add_argument("--window-sec", type=float, default=5.0)
     parser.add_argument("--frame-fps", type=float, default=2.0)
     parser.add_argument("--frames-per-window", type=int, default=10)
+    parser.add_argument("--frame-sampler", choices=["uniform", "smart"], default="uniform")
+    parser.add_argument("--sampler-metric", choices=["ssim", "mad"], default="ssim")
     parser.add_argument("--jpeg-quality", type=int, default=80)
     parser.add_argument("--descriptor-timeout-sec", type=int, default=90)
     parser.add_argument("--start-sec", type=float, default=0.0)
@@ -259,6 +276,7 @@ def main() -> None:
     print(f"  Video:             {args.video}")
     print(f"  Duration:          {duration:.1f}s")
     print(f"  Windows:           {len(windows)} x {args.window_sec:.1f}s ({args.frames_per_window} frames @ {args.frame_fps:.1f}fps)")
+    print(f"  Sampler:           {args.frame_sampler}" + (f" ({args.sampler_metric})" if args.frame_sampler == "smart" else ""))
     print(f"  Windows/call:      {args.windows_per_call}")
     print(f"  Descriptor model:  {args.descriptor_model}")
     print(f"  Reasoner model:    {args.reasoner_model}")
@@ -319,6 +337,8 @@ def main() -> None:
         descriptor_top_p=args.descriptor_top_p,
         descriptor_timeout_sec=args.descriptor_timeout_sec,
         jpeg_quality=args.jpeg_quality,
+        frame_sampler=args.frame_sampler,
+        sampler_metric=args.sampler_metric,
         windows_per_call=args.windows_per_call,
         descriptor_log_path=descriptor_log_path,
         reasoner_log_path=reasoner_log_path,
@@ -331,6 +351,8 @@ def main() -> None:
         "input_video": args.video,
         "descriptor_model": args.descriptor_model,
         "reasoner_model": args.reasoner_model,
+        "frame_sampler": args.frame_sampler,
+        "sampler_metric": args.sampler_metric if args.frame_sampler == "smart" else None,
         "events": events,
     }
     output_path = Path(args.output)
