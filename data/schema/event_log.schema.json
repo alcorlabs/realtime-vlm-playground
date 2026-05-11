@@ -35,9 +35,6 @@
     "total_frames_delivered": {
       "type": "integer"
     },
-    "total_audio_chunks_delivered": {
-      "type": "integer"
-    },
     "model_used": {
       "type": "string"
     },
@@ -87,7 +84,7 @@
           },
           "source": {
             "type": "string",
-            "enum": ["video", "audio", "both"],
+            "enum": ["video"],
             "description": "Which input stream triggered this detection"
           },
           "vlm_observation": {
@@ -101,10 +98,6 @@
           "spoken_response": {
             "type": "string",
             "description": "Text of what the assistant would say to the user (e.g., 'Stop — you grabbed the wrong toolbox. The circuit breaker parts are in the blue box on your right.'). Required for error_detected events."
-          },
-          "spoken_audio_path": {
-            "type": "string",
-            "description": "Path to generated TTS audio file for this response (optional, bonus)."
           }
         }
       }

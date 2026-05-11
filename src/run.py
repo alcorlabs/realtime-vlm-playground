@@ -1,8 +1,9 @@
 """
 VLM Orchestrator — Starter Template
 
-This is where you implement your pipeline. The harness feeds you frames
-and audio in real-time. You call VLMs, detect events, and emit them back.
+This is where you implement your pipeline. The harness feeds you video
+frames in real-time. You call a VLM (or other model of your choice),
+detect events, and emit them back.
 
 Usage:
     python src/run.py \\
@@ -31,24 +32,28 @@ from src.data_loader import load_procedure_json, validate_procedure_format
 
 
 # ==========================================================================
-# VLM API HELPER (provided — feel free to modify)
+# VLM API HELPER (provided — feel free to modify or replace)
 # ==========================================================================
 
 def call_vlm(
     api_key: str,
     frame_base64: str,
     prompt: str,
-    model: str = "google/gemini-2.5-flash",
+    model: str,
     stream: bool = False,
 ) -> str:
     """
-    Call a VLM via OpenRouter.
+    Call a VLM. This reference implementation targets the OpenAI-compatible
+    chat-completions endpoint exposed by OpenRouter (https://openrouter.ai),
+    which proxies many providers behind a single API key. Replace the URL
+    and headers below if you prefer a different gateway or a direct
+    provider SDK.
 
     Args:
-        api_key: OpenRouter API key
+        api_key: API key for your chosen provider/gateway
         frame_base64: Base64-encoded JPEG frame
         prompt: Text prompt
-        model: OpenRouter model string
+        model: Model identifier in the provider's expected format
         stream: If True, use streaming (SSE) responses for lower time-to-first-token
 
     Returns:
@@ -112,12 +117,11 @@ class Pipeline:
     """
     Your VLM orchestration pipeline.
 
-    The harness calls on_frame() and on_audio() in real-time as the video plays.
+    The harness calls on_frame() in real-time as the video plays.
     When you detect an event, call self.harness.emit_event({...}).
 
     Key design decisions you need to make:
-    - Which frames to send to the VLM (not every frame — budget is limited)
-    - Whether/how to use audio (speech-to-text for instructor corrections?)
+    - Which frames to send to the model (not every frame — budget is limited)
     - Which model to use and when (cheap for easy frames, expensive for hard ones?)
     - How to track procedure state (current step, completed steps)
     - How to generate spoken responses for errors
@@ -164,21 +168,6 @@ class Pipeline:
         """
         pass  # TODO: Implement
 
-    def on_audio(self, audio_bytes: bytes, start_sec: float, end_sec: float):
-        """
-        Called by the harness for each audio chunk.
-
-        Args:
-            audio_bytes: Raw PCM audio (16kHz, mono, 16-bit)
-            start_sec: Chunk start time in video
-            end_sec: Chunk end time in video
-
-        TODO: Implement your audio processing logic.
-        Consider: speech-to-text, keyword detection, silence detection.
-        The instructor's verbal corrections are a strong signal for errors.
-        """
-        pass  # TODO: Implement
-
 
 # ==========================================================================
 # MAIN ENTRY POINT
@@ -187,15 +176,13 @@ class Pipeline:
 def main():
     parser = argparse.ArgumentParser(description="VLM Orchestrator Pipeline")
     parser.add_argument("--procedure", required=True, help="Path to procedure JSON")
-    parser.add_argument("--video", required=True, help="Path to video MP4 (with audio)")
+    parser.add_argument("--video", required=True, help="Path to video MP4")
     parser.add_argument("--output", default="output/events.json", help="Output JSON path")
     parser.add_argument("--speed", type=float, default=1.0,
                         help="Playback speed (1.0 = real-time, 2.0 = 2x, etc.)")
     parser.add_argument("--frame-fps", type=float, default=2.0,
                         help="Frames per second delivered to pipeline (default: 2)")
-    parser.add_argument("--audio-chunk-sec", type=float, default=5.0,
-                        help="Audio chunk duration in seconds (default: 5)")
-    parser.add_argument("--api-key", help="OpenRouter API key (or set OPENROUTER_API_KEY)")
+    parser.add_argument("--api-key", help="API key for your chosen provider (or set OPENROUTER_API_KEY)")
     parser.add_argument("--dry-run", action="store_true", help="Validate inputs only")
     args = parser.parse_args()
 
@@ -236,14 +223,12 @@ def main():
         procedure_path=args.procedure,
         speed=args.speed,
         frame_fps=args.frame_fps,
-        audio_chunk_sec=args.audio_chunk_sec,
     )
 
     pipeline = Pipeline(harness, api_key, procedure)
 
     # Register callbacks
     harness.on_frame(pipeline.on_frame)
-    harness.on_audio(pipeline.on_audio)
 
     # Run
     results = harness.run()
@@ -257,7 +242,7 @@ def main():
     print()
 
     if not results.events:
-        print("  WARNING: No events detected. Implement Pipeline.on_frame() and Pipeline.on_audio().")
+        print("  WARNING: No events detected. Implement Pipeline.on_frame().")
 
 
 if __name__ == "__main__":

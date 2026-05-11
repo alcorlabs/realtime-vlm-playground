@@ -50,19 +50,7 @@ If you see ✓ checkmarks, you're ready to go!
 
 ### Option B: Local Setup (macOS/Linux)
 
-**Requirements**: Python 3.11+, pip, git, FFmpeg
-
-**Install FFmpeg** (needed for audio extraction):
-```bash
-# macOS
-brew install ffmpeg
-
-# Ubuntu/Debian
-sudo apt update && sudo apt install ffmpeg
-
-# Verify
-ffmpeg -version
-```
+**Requirements**: Python 3.11+, pip, git
 
 **Steps**:
 
@@ -95,9 +83,7 @@ ffmpeg -version
 
 ### Option C: Local Setup (Windows)
 
-**Requirements**: Python 3.11+ (from python.org), pip, git, FFmpeg
-
-**Install FFmpeg**: Download from https://ffmpeg.org/download.html and add to your PATH.
+**Requirements**: Python 3.11+ (from python.org), pip, git
 
 **Steps**:
 
@@ -204,14 +190,6 @@ Verify it's set:
 ```bash
 echo $OPENROUTER_API_KEY  # macOS/Linux
 echo %OPENROUTER_API_KEY%  # Windows
-```
-
-### "ffmpeg: command not found" or no audio in pipeline
-
-FFmpeg is required for audio extraction. Install it:
-```bash
-brew install ffmpeg          # macOS
-sudo apt install ffmpeg      # Ubuntu/Debian
 ```
 
 ### "opencv-python-headless installation fails"

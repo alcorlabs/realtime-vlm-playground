@@ -4,8 +4,7 @@
   "start_time": "2026-03-18T10:00:00Z",
   "end_time": "2026-03-18T10:03:12Z",
   "total_frames_delivered": 86,
-  "total_audio_chunks_delivered": 17,
-  "model_used": "google/gemini-2.5-flash",
+  "model_used": "your-chosen-model",
   "total_api_cost_usd": 0.12,
   "events": [
     {
@@ -34,8 +33,8 @@
       "step_id": 2,
       "confidence": 0.88,
       "description": "The student turns on the circuit breaker box.",
-      "source": "both",
-      "vlm_observation": "A clicking sound is heard and the switch on the breaker box is now in the ON position."
+      "source": "video",
+      "vlm_observation": "The switch on the breaker box is now in the ON position."
     },
     {
       "timestamp_sec": 62.0,

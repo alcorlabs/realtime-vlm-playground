@@ -1,12 +1,12 @@
 """
 VLM Orchestrator — Streaming Harness
 
-Simulates real-time video+audio delivery and measures detection latency.
+Simulates real-time video frame delivery and measures detection latency.
 This is the test harness candidates run their pipeline against.
 
 The harness:
-  1. Reads a video file and emits frames + audio chunks at real-time speed
-  2. Calls the candidate's pipeline callback for each frame/audio chunk
+  1. Reads a video file and emits frames at real-time speed
+  2. Calls the candidate's pipeline callback for each frame
   3. Collects emitted events and timestamps when they were emitted
   4. Measures detection delay: wall-clock time from when a video moment
      passed to when the pipeline reported a detection for it
@@ -20,9 +20,8 @@ Usage:
         speed=1.0,  # 1.0 = real-time, 2.0 = 2x speed, etc.
     )
 
-    # Your pipeline registers callbacks
-    harness.on_frame(my_frame_handler)      # called with (frame, timestamp_sec)
-    harness.on_audio(my_audio_handler)      # called with (audio_chunk, timestamp_sec)
+    # Your pipeline registers a frame callback
+    harness.on_frame(my_frame_handler)      # called with (frame, timestamp_sec, frame_base64)
 
     # When your pipeline detects something, it calls:
     harness.emit_event({
@@ -41,7 +40,6 @@ import json
 import time
 import io
 import base64
-import subprocess
 import threading
 from pathlib import Path
 from typing import Callable, Dict, List, Any, Optional, Tuple
@@ -74,7 +72,6 @@ class HarnessResults:
     video_duration_sec: float
     wall_duration_sec: float
     total_frames_delivered: int
-    total_audio_chunks_delivered: int
     events: List[Dict[str, Any]]     # Events in output schema format (with detection_delay_sec added)
     mean_detection_delay_sec: float
     max_detection_delay_sec: float
@@ -82,12 +79,12 @@ class HarnessResults:
 
 class StreamingHarness:
     """
-    Simulates real-time video+audio streaming and measures detection latency.
+    Simulates real-time video streaming and measures detection latency.
 
     The harness plays through a video at a configurable speed, delivering
-    frames and audio chunks to registered callbacks. When the candidate's
-    pipeline detects an event, it calls emit_event(). The harness records
-    the wall-clock time and computes detection delay.
+    frames to a registered callback. When the candidate's pipeline detects
+    an event, it calls emit_event(). The harness records the wall-clock
+    time and computes detection delay.
     """
 
     def __init__(
@@ -96,24 +93,20 @@ class StreamingHarness:
         procedure_path: str,
         speed: float = 1.0,
         frame_fps: float = 2.0,
-        audio_chunk_sec: float = 5.0,
     ):
         """
         Args:
-            video_path: Path to MP4 file (with audio)
+            video_path: Path to MP4 file
             procedure_path: Path to procedure JSON
             speed: Playback speed multiplier (1.0 = real-time, 2.0 = 2x faster)
             frame_fps: How many frames per second to deliver to the pipeline
-            audio_chunk_sec: Audio chunk duration in seconds
         """
         self.video_path = video_path
         self.procedure_path = procedure_path
         self.speed = speed
         self.frame_fps = frame_fps
-        self.audio_chunk_sec = audio_chunk_sec
 
         self._frame_callbacks: List[Callable] = []
-        self._audio_callbacks: List[Callable] = []
         self._emitted_events: List[EmittedEvent] = []
         self._start_wall_time: float = 0
         self._current_video_time: float = 0
@@ -135,19 +128,8 @@ class StreamingHarness:
         """
         self._frame_callbacks.append(callback)
 
-    def on_audio(self, callback: Callable[[bytes, float, float], None]):
-        """
-        Register an audio callback.
-
-        Your callback receives:
-            audio_bytes: raw PCM audio bytes for this chunk
-            start_sec: chunk start timestamp in the video
-            end_sec: chunk end timestamp in the video
-        """
-        self._audio_callbacks.append(callback)
-
     VALID_EVENT_TYPES = {"step_completion", "error_detected", "idle_detected"}
-    VALID_SOURCES = {"video", "audio", "both"}
+    VALID_SOURCES = {"video"}
     VALID_ERROR_TYPES = {"wrong_action", "wrong_sequence", "safety_violation", "improper_technique", "other"}
     VALID_SEVERITIES = {"info", "warning", "critical"}
 
@@ -228,56 +210,6 @@ class StreamingHarness:
                 detection_delay_sec=max(0, delay),
             ))
 
-    def _extract_audio_chunks(self) -> List[Tuple[bytes, float, float]]:
-        """Extract audio as PCM chunks using ffmpeg."""
-        chunks = []
-        try:
-            # Get duration
-            cap = cv2.VideoCapture(self.video_path)
-            fps = cap.get(cv2.CAP_PROP_FPS) or 30
-            total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-            duration = total_frames / fps
-            cap.release()
-
-            # Extract full audio as WAV PCM
-            result = subprocess.run(
-                [
-                    "ffmpeg", "-i", self.video_path,
-                    "-vn", "-acodec", "pcm_s16le",
-                    "-ar", "16000", "-ac", "1",
-                    "-f", "wav", "-"
-                ],
-                capture_output=True, timeout=60,
-            )
-
-            if result.returncode != 0:
-                print(f"  [harness] Warning: could not extract audio (ffmpeg returned {result.returncode})")
-                return []
-
-            audio_data = result.stdout
-            # Skip WAV header (44 bytes)
-            pcm_data = audio_data[44:]
-            sample_rate = 16000
-            bytes_per_sample = 2  # 16-bit
-
-            chunk_samples = int(self.audio_chunk_sec * sample_rate)
-            chunk_bytes = chunk_samples * bytes_per_sample
-
-            t = 0.0
-            offset = 0
-            while offset < len(pcm_data):
-                end_offset = min(offset + chunk_bytes, len(pcm_data))
-                chunk = pcm_data[offset:end_offset]
-                end_t = min(t + self.audio_chunk_sec, duration)
-                chunks.append((chunk, t, end_t))
-                t = end_t
-                offset = end_offset
-
-        except Exception as e:
-            print(f"  [harness] Warning: audio extraction failed: {e}")
-
-        return chunks
-
     @staticmethod
     def frame_to_base64(frame: np.ndarray) -> str:
         """Convert BGR frame to base64 JPEG."""
@@ -291,7 +223,7 @@ class StreamingHarness:
         """
         Run the streaming simulation.
 
-        Delivers frames and audio at real-time speed (adjusted by self.speed).
+        Delivers frames at real-time speed (adjusted by self.speed).
         Returns results with all emitted events and timing data.
         """
         print(f"{'=' * 60}")
@@ -301,7 +233,6 @@ class StreamingHarness:
         print(f"  Video:     {self.video_path}")
         print(f"  Speed:     {self.speed}x real-time")
         print(f"  Frame FPS: {self.frame_fps}")
-        print(f"  Audio:     {self.audio_chunk_sec}s chunks")
         print()
 
         # Open video
@@ -316,13 +247,7 @@ class StreamingHarness:
         # Compute frame interval (in video-time seconds)
         frame_interval = 1.0 / self.frame_fps
 
-        # Extract audio chunks upfront
-        audio_chunks = self._extract_audio_chunks()
-        next_audio_idx = 0
-        total_audio_delivered = 0
-
         print(f"  Video:     {video_duration:.1f}s @ {video_fps:.0f}fps ({total_frames} frames)")
-        print(f"  Audio:     {len(audio_chunks)} chunks")
         print(f"  Delivering ~{int(video_duration * self.frame_fps)} frames to pipeline")
         print()
         print(f"  Starting simulation...")
@@ -351,20 +276,6 @@ class StreamingHarness:
             # Update current video time
             with self._lock:
                 self._current_video_time = next_frame_video_time
-
-            # Deliver audio chunks that fall before this frame
-            while next_audio_idx < len(audio_chunks):
-                audio_bytes, audio_start, audio_end = audio_chunks[next_audio_idx]
-                if audio_start <= next_frame_video_time:
-                    for cb in self._audio_callbacks:
-                        try:
-                            cb(audio_bytes, audio_start, audio_end)
-                        except Exception as e:
-                            print(f"  [harness] Audio callback error at {audio_start:.1f}s: {e}")
-                    next_audio_idx += 1
-                    total_audio_delivered += 1
-                else:
-                    break
 
             # Deliver frame
             frame_b64 = self.frame_to_base64(frame)
@@ -407,7 +318,6 @@ class StreamingHarness:
         print(f"  Simulation complete")
         print(f"  {'=' * 56}")
         print(f"  Frames delivered:  {frames_delivered}")
-        print(f"  Audio delivered:   {total_audio_delivered} chunks")
         print(f"  Events detected:   {len(output_events)}")
         print(f"  Wall time:         {wall_duration:.1f}s")
         print(f"  Mean detect delay: {mean_delay:.2f}s")
@@ -423,7 +333,6 @@ class StreamingHarness:
             video_duration_sec=video_duration,
             wall_duration_sec=wall_duration,
             total_frames_delivered=frames_delivered,
-            total_audio_chunks_delivered=total_audio_delivered,
             events=output_events,
             mean_detection_delay_sec=round(mean_delay, 3),
             max_detection_delay_sec=round(max_delay, 3),
